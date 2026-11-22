@@ -41,6 +41,7 @@ func WebPQualityCheck(check func(original, candidate []byte) bool) Option {
 type Option func(*options)
 
 type options struct {
+	browserImage     bool
 	keepFormat       bool
 	svgStandalone    bool
 	heicQualityCheck func([]byte, []byte) bool
@@ -97,7 +98,8 @@ func Zopfli() Option {
 }
 
 // Compress prefers a smaller verified WebP, then a smaller same-format image.
-// When neither candidate qualifies, it returns the original input.
+// When neither candidate qualifies, it returns the original input. BrowserImage
+// enables a browser-compatible fallback for selected formats.
 // Treat the returned slice as read-only if it aliases input.
 func Compress(input []byte, opts ...Option) ([]byte, Format, error) {
 	var settings options
@@ -124,6 +126,9 @@ func Compress(input []byte, opts ...Option) ([]byte, Format, error) {
 		return output, ICO, nil
 	}
 	if tiffcodec.IsTIFF(input) {
+		if settings.browserImage {
+			return settings.convertBrowserImage(input, TIFF, tiffcodec.BrowserSource)
+		}
 		if candidate := settings.webPCandidate(input, tiffcodec.WebPSource); candidate != nil {
 			return candidate, WebP, nil
 		}
@@ -151,6 +156,12 @@ func Compress(input []byte, opts ...Option) ([]byte, Format, error) {
 		return output, SVG, nil
 	}
 	if heiccodec.IsHEIC(input) {
+		if settings.browserImage {
+			return settings.convertBrowserImage(input, HEIC, heiccodec.BrowserSource)
+		}
+		if candidate := settings.webPCandidate(input, heiccodec.WebPSource); candidate != nil {
+			return candidate, WebP, nil
+		}
 		output, err := heiccodec.Compress(input, settings.preserveMetadata, settings.heicQualityCheck)
 		if err != nil {
 			return nil, "", err
@@ -165,6 +176,9 @@ func Compress(input []byte, opts ...Option) ([]byte, Format, error) {
 		return output, AVIF, nil
 	}
 	if jxlcodec.IsJPEGXL(input) {
+		if settings.browserImage {
+			return settings.convertBrowserImage(input, JPEGXL, jxlcodec.BrowserSource)
+		}
 		output, err := jxlcodec.Compress(input, settings.preserveMetadata, settings.jxlQualityCheck)
 		if err != nil {
 			return nil, "", err
@@ -174,6 +188,9 @@ func Compress(input []byte, opts ...Option) ([]byte, Format, error) {
 	// Generic HEIF does not imply HEVC. Preserve all items and presentation
 	// properties until the actual codec and complete rendering can be verified.
 	if heiccodec.IsHEIF(input) {
+		if settings.browserImage {
+			return settings.convertBrowserImage(input, HEIF, heiccodec.BrowserSource)
+		}
 		return input, HEIF, nil
 	}
 

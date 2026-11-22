@@ -27,26 +27,14 @@ func Compress(input []byte, preserveMetadata bool, check func([]byte, []byte) bo
 	if config.Width <= 0 || config.Height <= 0 {
 		return nil, errors.New("limen: invalid JPEG XL dimensions")
 	}
-	if check == nil || preserveMetadata || config.Width > maxPixels/config.Height {
+	if check == nil || preserveMetadata {
 		return input, nil
 	}
-	// Restrict recompression to eight-bit SDR; higher precision may represent
-	// HDR values that an integer image cannot preserve.
-	if config.ColorModel != color.NRGBAModel && config.ColorModel != color.GrayModel {
-		return input, nil
-	}
-	decoded, err := jxl.DecodeAll(bytes.NewReader(input), jxl.Options{FrameSizeLimit: maxPixels, MaxFrames: 2, Threads: 1})
-	if errors.Is(err, jxl.ErrUnsupported) {
-		return input, nil
-	}
+	source, err := decodeSDRStill(input, config)
 	if err != nil {
 		return nil, err
 	}
-	if len(decoded.Image) != 1 || len(decoded.Color.ICCP) != 0 || decoded.Color.Primaries != 1 || decoded.Color.Transfer != 13 {
-		return input, nil
-	}
-	source := decoded.Image[0]
-	if source.Bounds().Dx() != config.Width || source.Bounds().Dy() != config.Height {
+	if source == nil {
 		return input, nil
 	}
 	best := input
@@ -63,4 +51,38 @@ func Compress(input []byte, preserveMetadata bool, check func([]byte, []byte) bo
 	}
 	accept(baseline)
 	return best, nil
+}
+
+// BrowserSource returns the presented pixels of a supported eight-bit sRGB still.
+func BrowserSource(input []byte) image.Image {
+	if !IsJPEGXL(input) || len(input) > 64<<20 {
+		return nil
+	}
+	config, err := jxl.DecodeConfig(bytes.NewReader(input))
+	if err != nil || config.Width <= 0 || config.Height <= 0 {
+		return nil
+	}
+	source, _ := decodeSDRStill(input, config)
+	return source
+}
+
+func decodeSDRStill(input []byte, config image.Config) (image.Image, error) {
+	if config.Width > maxPixels/config.Height || (config.ColorModel != color.NRGBAModel && config.ColorModel != color.GrayModel) {
+		return nil, nil
+	}
+	decoded, err := jxl.DecodeAll(bytes.NewReader(input), jxl.Options{FrameSizeLimit: maxPixels, MaxFrames: 2, Threads: 1})
+	if errors.Is(err, jxl.ErrUnsupported) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if len(decoded.Image) != 1 || len(decoded.Color.ICCP) != 0 || decoded.Color.Primaries != 1 || decoded.Color.Transfer != 13 {
+		return nil, nil
+	}
+	source := decoded.Image[0]
+	if source.Bounds().Size() != image.Pt(config.Width, config.Height) {
+		return nil, nil
+	}
+	return source, nil
 }

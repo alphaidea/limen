@@ -5,9 +5,10 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"image"
+
 	"github.com/alphaidea/limen/internal/pixelcheck"
 	"golang.org/x/image/tiff"
-	"image"
 )
 
 // IsTIFF recognises classic TIFF and BigTIFF byte-order signatures.
@@ -65,6 +66,12 @@ func Compress(b []byte, preserve bool) ([]byte, error) {
 // WebPSource returns a single page without resolution or presentation tags.
 func WebPSource(b []byte) image.Image {
 	source, _ := decodeSinglePage(b, true)
+	return source
+}
+
+// BrowserSource returns a supported single page, allowing standard 72 DPI tags.
+func BrowserSource(b []byte) image.Image {
+	source, _ := decodeSinglePage(b, false)
 	return source
 }
 
