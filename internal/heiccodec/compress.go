@@ -258,6 +258,59 @@ func Compress(input []byte, preserve bool, check func([]byte, []byte) bool) ([]b
 	return best, nil
 }
 
+// WebPSource returns the presented pixels of a supported HEIC still within WebP limits.
+func WebPSource(input []byte) image.Image {
+	return browserSource(input, maxPixels, 16383)
+}
+
+// BrowserSource returns the presented pixels of a supported 8-bit SDR HEVC still.
+func BrowserSource(input []byte) image.Image {
+	return browserSource(input, maxCompressionPixels, maxCompressionPixels)
+}
+
+func browserSource(input []byte, pixelLimit, dimensionLimit int) image.Image {
+	if len(input) > 64<<20 || (!IsHEIC(input) && !IsHEIF(input)) || !supported(input, 0) {
+		return nil
+	}
+	meta, ok := findBox(input, 0, "meta")
+	if !ok {
+		return nil
+	}
+	table, ok := readProperties(input[meta.payload:meta.end])
+	if !ok {
+		return nil
+	}
+	if _, ok := table.presentation(); !ok {
+		return nil
+	}
+	for _, property := range table.properties {
+		switch string(property[4:8]) {
+		case "mdcv", "clli":
+			return nil
+		}
+	}
+	reader := bytes.NewReader(input)
+	config, err := heic.DecodeConfig(reader)
+	if err != nil || config.ColorModel != color.NRGBAModel || config.Width <= 0 || config.Height <= 0 ||
+		config.Width > pixelLimit/config.Height || config.Width > dimensionLimit || config.Height > dimensionLimit {
+		return nil
+	}
+	reader.Reset(input)
+	exif, err := heic.DecodeExif(reader)
+	if err != nil && !errors.Is(err, heic.ErrNoExif) || exif != nil && exif.Orientation != 1 {
+		return nil
+	}
+	reader.Reset(input)
+	source, colour, err := heic.DecodeColor(reader, heic.Options{AutoRotate: true, FrameSizeLimit: pixelLimit, Threads: 2})
+	if err != nil || !isSDR(colour) {
+		return nil
+	}
+	if _, ok := source.(*image.NRGBA); !ok {
+		return nil
+	}
+	return source
+}
+
 func isSDR(colour heic.ColorInfo) bool {
 	return len(colour.ICCP) == 0 && (colour.Primaries == 1 || colour.Primaries == 2) &&
 		(colour.Transfer == 13 || colour.Transfer == 2)
