@@ -127,7 +127,7 @@ func Compress(input []byte, opts ...Option) ([]byte, Format, error) {
 	}
 	if tiffcodec.IsTIFF(input) {
 		if settings.browserImage {
-			return settings.convertBrowserImage(input, TIFF, tiffcodec.BrowserSource)
+			return settings.convertBrowserTIFF(input)
 		}
 		if candidate := settings.webPCandidate(input, tiffcodec.WebPSource); candidate != nil {
 			return candidate, WebP, nil
@@ -157,7 +157,7 @@ func Compress(input []byte, opts ...Option) ([]byte, Format, error) {
 	}
 	if heiccodec.IsHEIC(input) {
 		if settings.browserImage {
-			return settings.convertBrowserImage(input, HEIC, heiccodec.BrowserSource)
+			return settings.convertBrowserHEIC(input, HEIC)
 		}
 		if candidate := settings.webPCandidate(input, heiccodec.WebPSource); candidate != nil {
 			return candidate, WebP, nil
@@ -177,7 +177,7 @@ func Compress(input []byte, opts ...Option) ([]byte, Format, error) {
 	}
 	if jxlcodec.IsJPEGXL(input) {
 		if settings.browserImage {
-			return settings.convertBrowserImage(input, JPEGXL, jxlcodec.BrowserSource)
+			return settings.convertBrowserJPEGXL(input)
 		}
 		output, err := jxlcodec.Compress(input, settings.preserveMetadata, settings.jxlQualityCheck)
 		if err != nil {
@@ -189,7 +189,7 @@ func Compress(input []byte, opts ...Option) ([]byte, Format, error) {
 	// properties until the actual codec and complete rendering can be verified.
 	if heiccodec.IsHEIF(input) {
 		if settings.browserImage {
-			return settings.convertBrowserImage(input, HEIF, heiccodec.BrowserSource)
+			return settings.convertBrowserHEIC(input, HEIF)
 		}
 		return input, HEIF, nil
 	}

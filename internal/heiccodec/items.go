@@ -5,9 +5,13 @@ import (
 	"encoding/binary"
 )
 
+type descriptiveItems struct {
+	exif, xmp int
+}
+
 // singlePrimary permits one visible image plus hidden grid tiles, alpha and
 // descriptive items. Other item types can affect how the file is presented.
-func singlePrimary(data []byte) uint32 {
+func singlePrimary(data []byte, descriptions *descriptiveItems) uint32 {
 	if len(data) < 6 || data[0] > 1 || data[1] != 0 || data[2] != 0 || data[3] != 0 {
 		return 0
 	}
@@ -61,10 +65,16 @@ func singlePrimary(data []byte) uint32 {
 				visible = id
 			}
 		case "Exif":
+			if descriptions != nil {
+				descriptions.exif++
+			}
 		case "mime":
 			contentType, _, ok := bytes.Cut(extra, []byte{0})
 			if !ok || string(contentType) != "application/rdf+xml" {
 				return 0
+			}
+			if descriptions != nil {
+				descriptions.xmp++
 			}
 		default:
 			return 0

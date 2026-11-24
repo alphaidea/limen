@@ -30,6 +30,10 @@ func IsHEIC(input []byte) bool {
 // supported rejects unhandled presentation properties before decoding. Unknown
 // boxes fail closed; sequence and unknown auxiliary properties are preserved.
 func supported(data []byte, depth int) bool {
+	return supportedStill(data, depth, false, nil)
+}
+
+func supportedStill(data []byte, depth int, allowICC bool, descriptions *descriptiveItems) bool {
 	if depth > 5 {
 		return false
 	}
@@ -55,7 +59,7 @@ func supported(data []byte, depth int) bool {
 			if depth != 1 || visible != 0 {
 				return false
 			}
-			visible = singlePrimary(payload)
+			visible = singlePrimary(payload, descriptions)
 			if visible == 0 {
 				return false
 			}
@@ -83,12 +87,13 @@ func supported(data []byte, depth int) bool {
 				return false
 			}
 		case "meta":
-			if depth != 0 || seenMeta || len(payload) < 4 || !bytes.Equal(payload[:4], []byte{0, 0, 0, 0}) || !supported(payload[4:], depth+1) {
+			if depth != 0 || seenMeta || len(payload) < 4 || !bytes.Equal(payload[:4], []byte{0, 0, 0, 0}) ||
+				!supportedStill(payload[4:], depth+1, allowICC, descriptions) {
 				return false
 			}
 			seenMeta = true
 		case "iprp", "ipco":
-			if !supported(payload, depth+1) {
+			if !supportedStill(payload, depth+1, allowICC, descriptions) {
 				return false
 			}
 		case "ispe":
@@ -109,11 +114,15 @@ func supported(data []byte, depth int) bool {
 				}
 			}
 		case "colr":
+			if allowICC && len(payload) > 4 && (string(payload[:4]) == "prof" || string(payload[:4]) == "rICC") {
+				break
+			}
 			if len(payload) != 11 || string(payload[:4]) != "nclx" || payload[10]&0x7f != 0 {
 				return false
 			}
 			primaries, transfer := binary.BigEndian.Uint16(payload[4:6]), binary.BigEndian.Uint16(payload[6:8])
-			if !isSDR(heic.ColorInfo{Primaries: primaries, Transfer: transfer}) && !isHDR(primaries, transfer) {
+			if !isSDR(heic.ColorInfo{Primaries: primaries, Transfer: transfer}) && !isHDR(primaries, transfer) &&
+				!(allowICC && iccTransfer(transfer)) {
 				return false
 			}
 		case "irot", "imir":
@@ -260,55 +269,177 @@ func Compress(input []byte, preserve bool, check func([]byte, []byte) bool) ([]b
 
 // WebPSource returns the presented pixels of a supported HEIC still within WebP limits.
 func WebPSource(input []byte) image.Image {
-	return browserSource(input, maxPixels, 16383)
-}
-
-// BrowserSource returns the presented pixels of a supported 8-bit SDR HEVC still.
-func BrowserSource(input []byte) image.Image {
-	return browserSource(input, maxCompressionPixels, maxCompressionPixels)
-}
-
-func browserSource(input []byte, pixelLimit, dimensionLimit int) image.Image {
-	if len(input) > 64<<20 || (!IsHEIC(input) && !IsHEIF(input)) || !supported(input, 0) {
-		return nil
-	}
-	meta, ok := findBox(input, 0, "meta")
+	source, ok := browserSource(input, maxPixels, 16383, false, false)
 	if !ok {
 		return nil
 	}
-	table, ok := readProperties(input[meta.payload:meta.end])
-	if !ok {
-		return nil
+	return source.Pixels
+}
+
+// BrowserStill contains presented pixels and metadata that can be carried in PNG.
+type BrowserStill struct {
+	Pixels                            image.Image
+	ICC, Exif, XMP                    []byte
+	HDR                               *BrowserHDR
+	ColourPrimaries, TransferFunction byte
+	PrimaryOnly                       bool
+}
+
+// BrowserSource returns a supported HEVC still with its presentation metadata.
+func BrowserSource(input []byte, preserveMetadata bool) (BrowserStill, bool) {
+	still, ok := browserSource(input, maxCompressionPixels, maxCompressionPixels, true, preserveMetadata)
+	if ok {
+		return still, true
 	}
-	if _, ok := table.presentation(); !ok {
-		return nil
-	}
-	for _, property := range table.properties {
-		switch string(property[4:8]) {
-		case "mdcv", "clli":
-			return nil
-		}
+	return browserPrimaryPNG(input, preserveMetadata)
+}
+
+// browserPrimaryPNG exports the decoded primary image when the container
+// cannot be carried across in full. It never submits pixels to the WebP encoder.
+func browserPrimaryPNG(input []byte, preserveMetadata bool) (BrowserStill, bool) {
+	var still BrowserStill
+	if len(input) > 64<<20 || (!IsHEIC(input) && !IsHEIF(input)) {
+		return still, false
 	}
 	reader := bytes.NewReader(input)
 	config, err := heic.DecodeConfig(reader)
-	if err != nil || config.ColorModel != color.NRGBAModel || config.Width <= 0 || config.Height <= 0 ||
+	if err != nil || config.Width <= 0 || config.Height <= 0 || config.Width > maxCompressionPixels/config.Height {
+		return still, false
+	}
+	reader.Reset(input)
+	pixels, colour, err := heic.DecodeColor(reader, heic.Options{AutoRotate: true, FrameSizeLimit: maxCompressionPixels, Threads: 2})
+	if err != nil {
+		return still, false
+	}
+	still.Pixels, still.ICC = pixels, colour.ICCP
+	still.PrimaryOnly = true
+	// Match the upload converter: an ICC profile takes precedence over nclx.
+	if colour.Primaries > 0 && colour.Transfer > 0 && colour.Primaries <= 255 && colour.Transfer <= 255 {
+		still.ColourPrimaries, still.TransferFunction = byte(colour.Primaries), byte(colour.Transfer)
+	}
+	reader.Reset(input)
+	exif, err := heic.DecodeExif(reader)
+	if err != nil && !errors.Is(err, heic.ErrNoExif) && preserveMetadata {
+		return still, false
+	}
+	// Orientation can affect presentation even when descriptive metadata was
+	// not requested.
+	if preserveMetadata || (exif != nil && exif.Orientation >= 2 && exif.Orientation <= 8) {
+		reader.Reset(input)
+		still.Exif, err = heic.RawExif(reader)
+		if err != nil && !errors.Is(err, heic.ErrNoExif) {
+			return still, false
+		}
+	}
+	if preserveMetadata {
+		reader.Reset(input)
+		still.XMP, err = heic.RawXMP(reader)
+		if err != nil && !errors.Is(err, heic.ErrNoXMP) {
+			return still, false
+		}
+	}
+	return still, true
+}
+
+func browserSource(input []byte, pixelLimit, dimensionLimit int, allowDeepAndICC, preserveMetadata bool) (BrowserStill, bool) {
+	var still BrowserStill
+	var descriptions descriptiveItems
+	if len(input) > 64<<20 || (!IsHEIC(input) && !IsHEIF(input)) ||
+		!supportedStill(input, 0, allowDeepAndICC, &descriptions) {
+		return still, false
+	}
+	meta, ok := findBox(input, 0, "meta")
+	if !ok {
+		return still, false
+	}
+	table, ok := readProperties(input[meta.payload:meta.end])
+	if !ok {
+		return still, false
+	}
+	if _, ok := table.presentation(); !ok {
+		return still, false
+	}
+	reader := bytes.NewReader(input)
+	config, err := heic.DecodeConfig(reader)
+	if err != nil || (!allowDeepAndICC && config.ColorModel != color.NRGBAModel) || config.Width <= 0 || config.Height <= 0 ||
 		config.Width > pixelLimit/config.Height || config.Width > dimensionLimit || config.Height > dimensionLimit {
-		return nil
+		return still, false
 	}
 	reader.Reset(input)
 	exif, err := heic.DecodeExif(reader)
 	if err != nil && !errors.Is(err, heic.ErrNoExif) || exif != nil && exif.Orientation != 1 {
-		return nil
+		return still, false
+	}
+	if preserveMetadata {
+		if descriptions.exif > 1 || descriptions.xmp > 1 || (descriptions.exif == 1) != (exif != nil) {
+			return still, false
+		}
+		if exif != nil {
+			reader.Reset(input)
+			still.Exif, err = heic.RawExif(reader)
+			if err != nil {
+				return still, false
+			}
+		}
+		reader.Reset(input)
+		still.XMP, err = heic.RawXMP(reader)
+		if err != nil && !errors.Is(err, heic.ErrNoXMP) {
+			return still, false
+		}
+		if (descriptions.xmp == 1) != (len(still.XMP) != 0) {
+			return still, false
+		}
 	}
 	reader.Reset(input)
 	source, colour, err := heic.DecodeColor(reader, heic.Options{AutoRotate: true, FrameSizeLimit: pixelLimit, Threads: 2})
-	if err != nil || !isSDR(colour) {
-		return nil
+	if err != nil {
+		return still, false
 	}
-	if _, ok := source.(*image.NRGBA); !ok {
-		return nil
+	switch source.(type) {
+	case *image.NRGBA:
+	case *image.NRGBA64:
+		if !allowDeepAndICC {
+			return still, false
+		}
+	default:
+		return still, false
 	}
-	return source
+	if isHDR(colour.Primaries, colour.Transfer) {
+		if !allowDeepAndICC || len(colour.ICCP) != 0 {
+			return still, false
+		}
+		if _, deep := source.(*image.NRGBA64); !deep {
+			return still, false
+		}
+		still.HDR = browserHDR(input, meta, table, colour)
+		if still.HDR == nil {
+			return still, false
+		}
+	} else {
+		if !isSDR(colour) && !(allowDeepAndICC && len(colour.ICCP) != 0 && iccTransfer(colour.Transfer)) {
+			return still, false
+		}
+		for _, property := range table.properties {
+			switch string(property[4:8]) {
+			case "mdcv", "clli":
+				return still, false
+			}
+		}
+	}
+	still.Pixels, still.ICC = source, colour.ICCP
+	if len(still.ICC) != 0 && colour.Primaries > 0 && colour.Transfer > 0 && colour.Primaries <= 255 && colour.Transfer <= 255 {
+		still.ColourPrimaries, still.TransferFunction = byte(colour.Primaries), byte(colour.Transfer)
+	}
+	return still, true
+}
+
+func iccTransfer(transfer uint16) bool {
+	switch transfer {
+	case 1, 2, 6, 13, 14, 15:
+		return true
+	default:
+		return false
+	}
 }
 
 func isSDR(colour heic.ColorInfo) bool {
