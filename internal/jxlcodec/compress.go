@@ -53,21 +53,32 @@ func Compress(input []byte, preserveMetadata bool, check func([]byte, []byte) bo
 	return best, nil
 }
 
-// BrowserSource returns the presented pixels of a supported eight-bit sRGB still.
-func BrowserSource(input []byte) image.Image {
-	if !IsJPEGXL(input) || len(input) > 64<<20 {
+// BrowserSource returns a supported sRGB still. With metadata preservation,
+// only a raw codestream can be converted because it has no container metadata.
+func BrowserSource(input []byte, preserveMetadata bool) image.Image {
+	if !IsJPEGXL(input) || len(input) > 64<<20 ||
+		(preserveMetadata && !bytes.HasPrefix(input, []byte{0xff, 0x0a})) {
 		return nil
 	}
 	config, err := jxl.DecodeConfig(bytes.NewReader(input))
 	if err != nil || config.Width <= 0 || config.Height <= 0 {
 		return nil
 	}
-	source, _ := decodeSDRStill(input, config)
+	source, _ := decodeSRGBStill(input, config)
 	return source
 }
 
 func decodeSDRStill(input []byte, config image.Config) (image.Image, error) {
 	if config.Width > maxPixels/config.Height || (config.ColorModel != color.NRGBAModel && config.ColorModel != color.GrayModel) {
+		return nil, nil
+	}
+	return decodeSRGBStill(input, config)
+}
+
+func decodeSRGBStill(input []byte, config image.Config) (image.Image, error) {
+	if config.Width > maxPixels/config.Height ||
+		(config.ColorModel != color.NRGBAModel && config.ColorModel != color.GrayModel &&
+			config.ColorModel != color.NRGBA64Model && config.ColorModel != color.Gray16Model) {
 		return nil, nil
 	}
 	decoded, err := jxl.DecodeAll(bytes.NewReader(input), jxl.Options{FrameSizeLimit: maxPixels, MaxFrames: 2, Threads: 1})

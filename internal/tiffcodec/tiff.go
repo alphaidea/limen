@@ -22,7 +22,7 @@ func Compress(b []byte, preserve bool) ([]byte, error) {
 	if preserve && IsTIFF(b) && len(b) >= 8 {
 		return b, nil
 	}
-	source, err := decodeSinglePage(b, false)
+	source, err := decodeSinglePage(b, false, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -65,17 +65,41 @@ func Compress(b []byte, preserve bool) ([]byte, error) {
 
 // WebPSource returns a single page without resolution or presentation tags.
 func WebPSource(b []byte) image.Image {
-	source, _ := decodeSinglePage(b, true)
+	source, _ := decodeSinglePage(b, true, nil)
 	return source
 }
 
-// BrowserSource returns a supported single page, allowing standard 72 DPI tags.
-func BrowserSource(b []byte) image.Image {
-	source, _ := decodeSinglePage(b, false)
-	return source
+type resolution struct {
+	values [2][2]uint64
+	unit   uint16
 }
 
-func decodeSinglePage(b []byte, forWebP bool) (image.Image, error) {
+// BrowserSource returns a single page and its physical pixel density, if present.
+func BrowserSource(b []byte) (image.Image, [2]uint32) {
+	res := resolution{unit: 2}
+	source, _ := decodeSinglePage(b, false, &res)
+	var density [2]uint32
+	if source == nil || res.values == ([2][2]uint64{}) {
+		return source, density
+	}
+	for axis, ratio := range res.values {
+		numerator, denominator := ratio[0]*100, ratio[1]
+		if res.unit == 2 {
+			numerator, denominator = ratio[0]*10_000, ratio[1]*254
+		}
+		if denominator == 0 {
+			return nil, density
+		}
+		rounded := (numerator + denominator/2) / denominator
+		if rounded == 0 || rounded > 0xffffffff {
+			return nil, density
+		}
+		density[axis] = uint32(rounded)
+	}
+	return source, density
+}
+
+func decodeSinglePage(b []byte, forWebP bool, res *resolution) (image.Image, error) {
 	if !IsTIFF(b) || len(b) < 8 {
 		return nil, errors.New("tiff: invalid header")
 	}
@@ -118,15 +142,24 @@ func decodeSinglePage(b []byte, forWebP bool) (image.Image, error) {
 			if q+8 > uint64(len(b)) {
 				return nil, errors.New("tiff: invalid resolution")
 			}
-			if uint64(order.Uint32(b[q:])) != 72*uint64(order.Uint32(b[q+4:])) || order.Uint32(b[q+4:]) == 0 {
+			numerator, denominator := uint64(order.Uint32(b[q:])), uint64(order.Uint32(b[q+4:]))
+			if denominator == 0 || (res == nil && numerator != 72*denominator) {
 				return nil, nil
+			}
+			if res != nil {
+				res.values[tag-282] = [2]uint64{numerator, denominator}
 			}
 		case 296:
 			if forWebP {
 				return nil, nil
 			}
-			if order.Uint16(b[p+2:]) != 3 || order.Uint32(b[p+4:]) != 1 || order.Uint16(b[p+8:]) != 2 {
+			unit := order.Uint16(b[p+8:])
+			if order.Uint16(b[p+2:]) != 3 || order.Uint32(b[p+4:]) != 1 ||
+				(unit != 2 && (res == nil || unit != 3)) {
 				return nil, nil
+			}
+			if res != nil {
+				res.unit = unit
 			}
 		default:
 			return nil, nil
